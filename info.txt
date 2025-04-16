@@ -1,1 +1,85 @@
-my name is Mashhoud
+image: atlassian/default-image:2
+definitions:
+  scripts:
+    build-push-image: &build-push-image
+      - echo "Creating .env file"
+      - |
+        prefix="HERONOS_"
+        printenv | grep "^${prefix}" | while IFS= read -r line; do
+          name="${line%%=*}"
+          value="${line#*=}"
+          newname="${name#$prefix}"
+          printf "%s=%s\n" "$newname" "$value" >> .env
+        done
+      - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+      - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+      - aws configure set default.region $AWS_DEFAULT_REGION
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_URL
+      - docker build --build-arg SSH_PRIVATE_KEY="$BITBUCKET_HERONOS_KEY" --build-arg SSH_PUBLIC_KEY="$BITBUCKET_HERONOS_KEY_PUB" -t $DOCKER_IMAGE_NAME:latest .
+      - docker tag $DOCKER_IMAGE_NAME:latest $ECR_URL/$DOCKER_IMAGE_NAME:${BITBUCKET_BUILD_NUMBER}
+      - docker push $ECR_URL/$DOCKER_IMAGE_NAME:${BITBUCKET_BUILD_NUMBER}
+
+    deploy-image: &deploy-image
+      - export DOCKER_HOST=${DOCKER_SOCKET}
+      - HOST_PORT_VAR="${BITBUCKET_BRANCH^^}_HOST_PORT" && HOST_PORT="${!HOST_PORT_VAR}"
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ECR_URL
+      - docker pull $ECR_URL/$DOCKER_IMAGE_NAME:${BITBUCKET_BUILD_NUMBER}
+      - docker rm -f ${BITBUCKET_BRANCH}-$DOCKER_IMAGE_NAME || true
+      - docker run -d --network $DOCKER_NETWORK -p $HOST_PORT:$CONTAINER_PORT --name ${BITBUCKET_BRANCH}-$DOCKER_IMAGE_NAME --restart unless-stopped $ECR_URL/$DOCKER_IMAGE_NAME:${BITBUCKET_BUILD_NUMBER}
+      - docker image prune -af
+
+pipelines:
+  branches:
+    dev:
+      - step:
+          name: Build and Push Docker Image to ECR
+          image: amazon/aws-cli
+          deployment: development
+          services:
+            - docker
+          script: *build-push-image
+
+      - step:
+          name: Deploy Docker Image on DEV Server
+          runs-on:
+            - dev
+            - gpu
+            - self.hosted
+            - linux.shell
+          script: *deploy-image
+
+    staging:
+      - step:
+          name: Build and Push Docker Image to ECR
+          image: amazon/aws-cli
+          deployment: stage
+          services:
+            - docker
+          script: *build-push-image
+
+      - step:
+          name: Deploy Docker Image on STAGING Server
+          runs-on:
+            - dev
+            - gpu
+            - self.hosted
+            - linux.shell
+          script: *deploy-image
+
+    master:
+      - step:
+          name: Build and Push Docker Image to ECR
+          image: amazon/aws-cli
+          deployment: production
+          services:
+            - docker
+          script: *build-push-image
+
+      - step:
+          name: Deploy Docker Image on PROD Server
+          runs-on:
+            - production
+            - gpu
+            - self.hosted
+            - linux.shell
+          script: *deploy-image
